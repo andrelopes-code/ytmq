@@ -6,14 +6,14 @@ import json
 import re
 import shutil
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from platformdirs import user_config_dir, user_music_dir
 
 CONFIG_PATH = Path(user_config_dir("ytmq")) / "config.json"
-FILTERS = ("songs", "videos")
+FILTERS = ("all", "songs", "albums", "videos")
 FORMATS = ("mp3", "opus", "m4a")
 # Preferred source stream per output format; opus and m4a are copied without re-encoding.
 SOURCE = {"mp3": "bestaudio", "opus": "bestaudio[acodec=opus]/bestaudio", "m4a": "bestaudio[ext=m4a]/bestaudio"}
@@ -28,6 +28,12 @@ class Track:
     album: str
     duration: str
     thumbnail: str
+    track_number: int | None = None
+    is_video: bool = False
+
+    @property
+    def key(self) -> str:
+        return self.video_id
 
     @property
     def url(self) -> str:
@@ -38,26 +44,90 @@ class Track:
         return safe_filename(f"{self.artist} - {self.title}" if self.artist else self.title)
 
 
+@dataclass(frozen=True)
+class Album:
+    browse_id: str
+    title: str
+    artist: str
+    kind: str  # "Album", "EP", "Single"
+    year: str
+    thumbnail: str
+
+    @property
+    def key(self) -> str:
+        return self.browse_id
+
+
+@dataclass(frozen=True)
+class Artist:
+    browse_id: str
+    name: str
+
+    @property
+    def key(self) -> str:
+        return self.browse_id
+
+
+Item = Track | Album | Artist
+
+
 def safe_filename(name: str) -> str:
     name = _INVALID_CHARS.sub("_", name).strip().rstrip(".")
     return name[:180] or "untitled"
 
 
+def _thumbnail(raw: dict) -> str:
+    thumbs = raw.get("thumbnails") or []
+    url = thumbs[-1]["url"] if thumbs else ""
+    # googleusercontent thumbnails accept an arbitrary size suffix.
+    return re.sub(r"=w\d+-h\d+", "=w544-h544", url)
+
+
+def _artists(raw: dict) -> str:
+    return ", ".join(a["name"] for a in raw.get("artists") or [] if a.get("name"))
+
+
 def parse_result(raw: dict) -> Track | None:
     if not raw.get("videoId"):
         return None
-    thumbs = raw.get("thumbnails") or []
-    thumb = thumbs[-1]["url"] if thumbs else ""
-    # googleusercontent thumbnails accept an arbitrary size suffix.
-    thumb = re.sub(r"=w\d+-h\d+", "=w544-h544", thumb)
+    album = raw.get("album")
     return Track(
         video_id=raw["videoId"],
         title=raw.get("title") or "",
-        artist=", ".join(a["name"] for a in raw.get("artists") or [] if a.get("name")),
-        album=(raw.get("album") or {}).get("name") or "",
+        artist=_artists(raw),
+        album=(album.get("name") if isinstance(album, dict) else album) or "",
         duration=raw.get("duration") or "",
-        thumbnail=thumb,
+        thumbnail=_thumbnail(raw),
+        track_number=raw.get("trackNumber"),
+        is_video=raw.get("resultType") == "video",
     )
+
+
+def parse_item(raw: dict, artist: str = "") -> Item | None:
+    kind = raw.get("resultType")
+    if kind == "album" or (kind is None and str(raw.get("browseId", "")).startswith("MPREb")):
+        return Album(
+            browse_id=raw["browseId"],
+            title=raw.get("title") or "",
+            artist=_artists(raw) or artist,
+            kind=raw.get("type") or "Album",
+            year=str(raw.get("year") or ""),
+            thumbnail=_thumbnail(raw),
+        )
+    if kind == "artist" and raw.get("browseId"):
+        return Artist(browse_id=raw["browseId"], name=raw.get("artist") or raw.get("title") or "")
+    if kind in (None, "song", "video"):
+        return parse_result(raw)
+    return None  # playlists, episodes, podcasts, profiles
+
+
+def _unique(items) -> list[Item]:
+    seen, out = set(), []
+    for item in items:
+        if item and item.key not in seen:
+            seen.add(item.key)
+            out.append(item)
+    return out
 
 
 class Searcher:
@@ -66,9 +136,32 @@ class Searcher:
 
         self._yt = YTMusic()
 
-    def search(self, query: str, kind: str = "songs", limit: int = 20) -> list[Track]:
-        raw = self._yt.search(query, filter=kind, limit=limit)
-        return [t for t in map(parse_result, raw) if t]
+    def search(self, query: str, kind: str = "all", limit: int = 20) -> list[Item]:
+        """`all` keeps YouTube Music's own ranking, including the top result (albums, lyrics matches)."""
+        raw = self._yt.search(query, filter=None if kind == "all" else kind, limit=limit)
+        return _unique(map(parse_item, raw))
+
+    def album(self, album: Album) -> list[Track]:
+        raw = self._yt.get_album(album.browse_id)
+        thumbnail = _thumbnail(raw) or album.thumbnail
+        tracks = []
+        for t in raw.get("tracks") or []:
+            track = parse_result(t)
+            if track and t.get("isAvailable", True):
+                tracks.append(replace(track, album=raw.get("title") or album.title, thumbnail=thumbnail,
+                                      artist=track.artist or album.artist))
+        return tracks
+
+    def artist(self, artist: Artist) -> list[Item]:
+        raw = self._yt.get_artist(artist.browse_id)
+        name = raw.get("name") or artist.name
+        songs = [parse_result(t) for t in (raw.get("songs") or {}).get("results", [])]
+        releases = [
+            parse_item({**r, "resultType": "album", "type": r.get("type") or section})
+            for key, section in (("albums", "Album"), ("singles", "Single"))
+            for r in (raw.get(key) or {}).get("results", [])
+        ]
+        return _unique([*songs, *(replace(r, artist=r.artist or name) for r in releases if r)])
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -191,7 +284,7 @@ def tag(path: Path, track: Track) -> None:
 
 
 def _tag_mp3(path: Path, track: Track, cover: bytes | None) -> None:
-    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, ID3NoHeaderError
+    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, TRCK, ID3NoHeaderError
 
     try:
         tags = ID3(path)
@@ -202,6 +295,8 @@ def _tag_mp3(path: Path, track: Track, cover: bytes | None) -> None:
         tags.add(TPE1(encoding=3, text=track.artist))
     if track.album:
         tags.add(TALB(encoding=3, text=track.album))
+    if track.track_number:
+        tags.add(TRCK(encoding=3, text=str(track.track_number)))
     if cover:
         tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
     tags.save(path, v2_version=3)
@@ -219,6 +314,8 @@ def _tag_opus(path: Path, track: Track, cover: bytes | None) -> None:
         audio["artist"] = track.artist
     if track.album:
         audio["album"] = track.album
+    if track.track_number:
+        audio["tracknumber"] = str(track.track_number)
     if cover:
         picture = Picture()
         picture.type, picture.mime, picture.data = 3, "image/jpeg", cover
@@ -235,6 +332,8 @@ def _tag_m4a(path: Path, track: Track, cover: bytes | None) -> None:
         audio["\xa9ART"] = [track.artist]
     if track.album:
         audio["\xa9alb"] = [track.album]
+    if track.track_number:
+        audio["trkn"] = [(track.track_number, 0)]
     if cover:
         audio["covr"] = [MP4Cover(cover, imageformat=MP4Cover.FORMAT_JPEG)]
     audio.save()

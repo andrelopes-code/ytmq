@@ -14,6 +14,8 @@ Windows: `winget install astral-sh.uv DenoLand.Deno`, then the same command. Use
 
 ## Usage
 
+The default `all` filter keeps YouTube Music's own ranking, including its top result, so a search can be a song, an album, an artist or a line of the lyrics. Albums and artists are marked with `›` and open with Enter.
+
 ```sh
 ytmq                         # opens with the last output folder
 ytmq -o ~/Music/new          # sets the output folder and remembers it
@@ -27,11 +29,15 @@ ytmq -j 8                    # 8 parallel downloads (default: 4)
 | Enter (search field) | search |
 | ↓ | move from the search field to the list |
 | any letter (list) | return to the search field with that letter |
-| Space | mark/unmark and move down |
-| Enter (list) | download the track now |
+| Space (track) | mark/unmark |
+| Space (album) | mark/unmark every track of the album |
+| Enter (track) | download the track now |
+| Enter (album, artist) | open its tracks / top songs and releases |
+| Esc | back to the previous list, or to the search field |
+| Ctrl+A | mark/unmark every track in the list |
 | Ctrl+D | download all marked tracks |
 | Ctrl+O | change the output folder (remembered) |
-| Ctrl+T | toggle the songs / videos filter (remembered) |
+| Ctrl+T | cycle the filter all / songs / albums / videos (remembered) |
 | Ctrl+F | cycle the audio format mp3 / opus / m4a (remembered) |
 | Tab | switch between list and queue |
 | Delete (queue) | remove from the queue |

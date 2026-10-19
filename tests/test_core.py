@@ -68,3 +68,23 @@ def test_download_skips_existing(tmp_path: Path):
 def test_clean_error_strips_ansi_and_prefix():
     raw = Exception("\x1b[0;31mERROR:\x1b[0m unable to download video data:  HTTP Error 403: Forbidden")
     assert core.clean_error(raw) == "unable to download video data: HTTP Error 403: Forbidden"
+
+
+def test_parse_item_kinds():
+    album = core.parse_item({"resultType": "album", "browseId": "MPREb_x", "title": "RAM",
+                             "artists": [{"name": "Daft Punk"}], "type": "Album", "year": "2013"})
+    assert album == core.Album("MPREb_x", "RAM", "Daft Punk", "Album", "2013", "")
+    artist = core.parse_item({"resultType": "artist", "browseId": "UC1", "artist": "Daft Punk"})
+    assert artist == core.Artist("UC1", "Daft Punk")
+    assert isinstance(core.parse_item({"resultType": "song", **RAW}), core.Track)
+    assert core.parse_item({"resultType": "playlist", "browseId": "VL1"}) is None
+
+
+def test_unique_keeps_first_occurrence():
+    t = core.parse_result(RAW)
+    assert core._unique([t, None, t]) == [t]
+
+
+def test_album_track_string_album_and_number():
+    t = core.parse_result({"videoId": "v", "title": "T", "album": "RAM", "trackNumber": 3})
+    assert (t.album, t.track_number) == ("RAM", 3)

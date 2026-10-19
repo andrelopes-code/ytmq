@@ -16,7 +16,7 @@ from textual.theme import Theme
 from textual.widgets import DataTable, Input, Static
 
 from . import core
-from .core import Track
+from .core import Album, Artist, Track
 
 MARKED, QUEUED, DONE, FAILED = "marked", "queued", "done", "failed"
 
@@ -84,7 +84,7 @@ def keys(*pairs: tuple[str, str, bool]) -> Text:
 
 class Results(DataTable):
     BINDINGS = [
-        Binding("enter", "app.download_now", "Download now", show=False),
+        Binding("enter", "app.activate", "Download or open", show=False),
         Binding("space", "app.toggle_mark", "Mark", show=False),
         Binding("slash", "app.focus_search", "Search", show=False),
     ]
@@ -213,9 +213,10 @@ class Ytmq(App):
     BINDINGS = [
         Binding("ctrl+d", "download_marked", "Download marked", priority=True),
         Binding("ctrl+o", "change_output", "Folder", priority=True),
-        Binding("ctrl+t", "toggle_filter", "Songs/Videos", priority=True),
+        Binding("ctrl+t", "toggle_filter", "Filter", priority=True),
         Binding("ctrl+f", "cycle_format", "Format", priority=True),
-        Binding("escape", "focus_search", "Search", show=False),
+        Binding("ctrl+a", "mark_all", "Mark all", priority=True),
+        Binding("escape", "back", "Back", show=False),
         Binding("tab", "focus_next", "Switch", show=False),
     ]
 
@@ -226,9 +227,14 @@ class Ytmq(App):
         self.output = output
         self.config = config
         self.initial_query = query
-        self.kind = config.get("filter", "songs")
+        self.kind = config.get("filter", "all")
+        if self.kind not in core.FILTERS:
+            self.kind = "all"
         self.fmt = fmt or config.get("format", "mp3")
-        self.tracks: dict[str, Track] = {}  # every track seen, by video_id
+        self.items: dict[str, core.Item] = {}  # every result seen, by key
+        self.tracks: dict[str, Track] = {}  # the Track subset of items, by video_id
+        self.views: list[dict] = []  # navigation stack: {"heading": Text, "keys": [...], "cursor": int}
+        self._albums: dict[str, list[Track]] = {}
         self.state: dict[str, str] = {}  # video_id -> MARKED/QUEUED/DONE/FAILED/"NN%"
         self.errors: dict[str, str] = {}  # video_id -> last failure message
         self.pool = ThreadPoolExecutor(max_workers=workers)
@@ -241,7 +247,7 @@ class Ytmq(App):
             yield Static(id="where")
         with Horizontal(id="searchbar"):
             yield Static("›", id="lens")
-            yield Input(placeholder="Song, artist or album", id="search")
+            yield Input(placeholder="Song, album, artist or a line of lyrics", id="search")
         with Horizontal(id="body"):
             with Vertical(id="left"):
                 yield Static(id="results-heading", classes="heading")
@@ -266,7 +272,8 @@ class Ytmq(App):
         queue.add_column("", key="status")
         self.show_empty(Text.assemble(
             ("Search YouTube Music\n\n", f"bold {TEXT}"),
-            ("Type and press enter. Space marks tracks,\nso one batch can span several searches.", MUTED),
+            ("Songs, albums, artists or a line of lyrics.\n"
+             "Space marks tracks, so one batch can span several searches.", MUTED),
         ))
         self.watch(self.screen, "focused", lambda _: self.refresh_chrome())
         self.refresh_chrome()
@@ -294,20 +301,53 @@ class Ytmq(App):
     def run_search(self, query: str) -> None:
         self.call_from_thread(self.show_empty, Text(f"Searching for “{query}”…", style=MUTED))
         try:
-            if self._searcher is None:
-                self._searcher = core.Searcher()
-            tracks = self._searcher.search(query, self.kind)
-            done = {t.video_id for t in tracks if self._exists(t)}
+            items = self.searcher.search(query, self.kind)
+            done = self._existing(items)
         except Exception as e:
-            self.call_from_thread(self.show_empty, Text.assemble(
-                ("Search failed\n\n", f"bold {ERROR}"),
-                (f"{e}\nCheck the connection and press enter to retry.", MUTED),
-            ))
+            self.call_from_thread(self.show_failure, "Search failed", e)
             return
-        self.call_from_thread(self.show_results, query, tracks, done)
+        if not items:
+            self.call_from_thread(self.show_nothing, query)
+            return
+        heading = Text("Results", style=f"bold {TEXT}")
+        heading.append(f"  {len(items)}", style=FAINT)
+        self.call_from_thread(self.show_view, heading, items, done, True)
+
+    @work(thread=True, exclusive=True, group="search")
+    def open_item(self, item: Album | Artist) -> None:
+        name = item.title if isinstance(item, Album) else item.name
+        self.call_from_thread(self.show_empty, Text(f"Opening “{name}”…", style=MUTED))
+        try:
+            if isinstance(item, Album):
+                items: list[core.Item] = self.album_tracks(item)
+                heading = Text(item.title, style=f"bold {TEXT}")
+                heading.append(f"  {item.artist}  {item.year}  {len(items)} tracks", style=FAINT)
+            else:
+                items = self.searcher.artist(item)
+                heading = Text(item.name, style=f"bold {TEXT}")
+                heading.append("  top songs and releases", style=FAINT)
+            done = self._existing(items)
+        except Exception as e:
+            self.call_from_thread(self.show_failure, f"Could not open “{name}”", e)
+            return
+        self.call_from_thread(self.show_view, heading, items, done, False, isinstance(item, Album))
+
+    @property
+    def searcher(self) -> core.Searcher:
+        if self._searcher is None:
+            self._searcher = core.Searcher()
+        return self._searcher
+
+    def album_tracks(self, album: Album) -> list[Track]:
+        if album.browse_id not in self._albums:
+            self._albums[album.browse_id] = self.searcher.album(album)
+        return self._albums[album.browse_id]
 
     def _exists(self, track: Track) -> bool:
         return core.target_path(track, self.output, self.fmt).exists()
+
+    def _existing(self, items: list[core.Item]) -> set[str]:
+        return {i.key for i in items if isinstance(i, Track) and self._exists(i)}
 
     def show_empty(self, message: Text) -> None:
         self.query_one(Results).display = False
@@ -315,54 +355,95 @@ class Ytmq(App):
         empty.update(message)
         empty.display = True
 
-    def show_results(self, query: str, tracks: list[Track], done: set[str]) -> None:
+    def show_failure(self, title: str, error: Exception) -> None:
+        self.show_empty(Text.assemble(
+            (f"{title}\n\n", f"bold {ERROR}"),
+            (f"{core.clean_error(error)}\nCheck the connection and try again.", MUTED),
+        ))
+        self.refresh_chrome()
+
+    def show_nothing(self, query: str) -> None:
+        hint = "press ctrl+t to search all types" if self.kind != "all" else "try fewer words"
+        self.show_empty(Text.assemble(
+            (f"Nothing found for “{query}”\n\n", f"bold {TEXT}"),
+            (hint[0].upper() + hint[1:] + ".", MUTED),
+        ))
+        self.views = []
+        self.refresh_chrome()
+
+    def show_view(
+        self, heading: Text, items: list[core.Item], done: set[str], root: bool, album: bool = False
+    ) -> None:
+        for item in items:
+            self.items[item.key] = item
+            if isinstance(item, Track):
+                self.tracks[item.key] = item
+                if item.key in done and item.key not in self.state:
+                    self.state[item.key] = DONE
+        results = self.query_one(Results)
+        if root:
+            self.views = []
+        elif self.views:
+            self.views[-1]["cursor"] = results.cursor_row
+        self.views.append({"heading": heading, "keys": [i.key for i in items], "cursor": 0, "album": album})
+        self.render_view()
+
+    def render_view(self) -> None:
+        view = self.views[-1]
         results = self.query_one(Results)
         results.clear()
         self._cursor_vid = None
-        if not tracks:
-            other = "videos" if self.kind == "songs" else "songs"
-            self.show_empty(Text.assemble(
-                (f"Nothing found for “{query}”\n\n", f"bold {TEXT}"),
-                (f"Try fewer words, or press ctrl+t to search {other}.", MUTED),
-            ))
-            self.refresh_chrome()
-            return
-        for t in tracks:
-            self.tracks[t.video_id] = t
-            if t.video_id in done and t.video_id not in self.state:
-                self.state[t.video_id] = DONE
-            results.add_row(*self.result_cells(t.video_id), key=t.video_id)
+        for key in view["keys"]:
+            results.add_row(*self.result_cells(key), key=key)
         self.query_one("#empty").display = False
         results.display = True
-        results.move_cursor(row=0)
+        results.move_cursor(row=view["cursor"])
         results.focus()
         self.refresh_chrome()
 
-    def result_cells(self, vid: str) -> list[Text]:
-        t, state = self.tracks[vid], self.state.get(vid)
-        under_cursor = vid == self._cursor_vid and self.query_one(Results).has_focus
+    def action_back(self) -> None:
+        if len(self.views) > 1:
+            self.views.pop()
+            self.render_view()
+        else:
+            self.action_focus_search()
+
+    def result_cells(self, key: str) -> list[Text]:
+        item, state = self.items[key], self.state.get(key)
+        under_cursor = key == self._cursor_vid and self.query_one(Results).has_focus
         status = Text("▌" if under_cursor else " ", style=ACCENT)
         status.append_text(glyph(state))
+        cell = dict(overflow="ellipsis", no_wrap=True)
+        if isinstance(item, Album):
+            return [status, Text(item.title, style=TEXT, **cell), Text(item.artist, style=MUTED, **cell),
+                    Text(f"{item.kind} {item.year}".strip(), style=FAINT, **cell), Text("›", style=MUTED, justify="right")]
+        if isinstance(item, Artist):
+            return [status, Text(item.name, style=TEXT, **cell), Text("Artist", style=FAINT, **cell),
+                    Text(""), Text("›", style=MUTED, justify="right")]
         title_style = f"bold {ACCENT}" if state == MARKED else (MUTED if state == DONE else TEXT)
+        in_album = bool(self.views) and self.views[-1].get("album")
+        number = f"{item.track_number}. " if item.track_number and in_album else ""
+        album = "" if in_album else (item.album or ("Video" if item.is_video else ""))
         return [
             status,
-            Text(t.title, style=title_style, overflow="ellipsis", no_wrap=True),
-            Text(t.artist, style=MUTED, overflow="ellipsis", no_wrap=True),
-            Text(t.album, style=FAINT, overflow="ellipsis", no_wrap=True),
-            Text(t.duration, style=FAINT, justify="right"),
+            Text(number + item.title, style=title_style, **cell),
+            Text(item.artist, style=MUTED, **cell),
+            Text(album, style=FAINT, **cell),
+            Text(item.duration, style=FAINT, justify="right"),
         ]
 
-    def rerender_result(self, vid: str | None) -> None:
+    def rerender_result(self, key: str | None) -> None:
         results = self.query_one(Results)
-        if vid and vid in results.rows:
-            for key, cell in zip(("st", "title"), self.result_cells(vid)):
-                results.update_cell(vid, key, cell)
+        if key and key in results.rows:
+            for column, cell in zip(("st", "title"), self.result_cells(key)):
+                results.update_cell(key, column, cell)
 
     @on(DataTable.RowHighlighted, "#results")
     def highlighted(self, event: DataTable.RowHighlighted) -> None:
         previous, self._cursor_vid = self._cursor_vid, event.row_key.value
         self.rerender_result(previous)
         self.rerender_result(self._cursor_vid)
+        self.refresh_chrome()
 
     def type_into_search(self, char: str) -> None:
         search = self.query_one("#search", Input)
@@ -393,10 +474,11 @@ class Ytmq(App):
             if state == DONE and vid not in self.query_one(Queue).rows:
                 self.state.pop(vid)
                 self.rerender_result(vid)
-        for vid in self.query_one(Results).rows:
-            if vid.value not in self.state and self._exists(self.tracks[vid.value]):
-                self.state[vid.value] = DONE
-                self.rerender_result(vid.value)
+        for row in self.query_one(Results).rows:
+            track = self.tracks.get(row.value)
+            if track and track.key not in self.state and self._exists(track):
+                self.state[track.key] = DONE
+                self.rerender_result(track.key)
         self.refresh_chrome()
         self.notify(f"Saving as {self.fmt}")
 
@@ -407,18 +489,53 @@ class Ytmq(App):
             return None
         return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
 
+    def cursor_item(self) -> core.Item | None:
+        key = self._cursor_id(self.query_one(Results))
+        return self.items.get(key) if key else None
+
     def action_toggle_mark(self) -> None:
-        results = self.query_one(Results)
-        vid = self._cursor_id(results)
-        if vid is None:
+        item = self.cursor_item()
+        if isinstance(item, Track):
+            current = self.state.get(item.key)
+            if current is None:
+                self.set_state(item.key, MARKED)
+            elif current == MARKED:
+                self.set_state(item.key, None)
+        elif isinstance(item, Album):
+            self.mark_album(item)
+        elif isinstance(item, Artist):
+            self.notify("Press enter to open the artist, then mark tracks or albums.")
+
+    @work(thread=True, group="album")
+    def mark_album(self, album: Album) -> None:
+        try:
+            tracks = self.album_tracks(album)
+        except Exception as e:
+            self.call_from_thread(self.notify, f"{album.title}: {core.clean_error(e)}", severity="error")
             return
-        current = self.state.get(vid)
-        if current is None:
-            self.set_state(vid, MARKED)
-        elif current == MARKED:
-            self.set_state(vid, None)
-        if results.cursor_row < results.row_count - 1:
-            results.move_cursor(row=results.cursor_row + 1)
+        self.call_from_thread(self.mark_tracks, tracks)
+
+    def mark_tracks(self, tracks: list[Track]) -> None:
+        """Mark every unmarked track; when all are already marked, unmark them instead."""
+        for t in tracks:
+            self.items.setdefault(t.key, t)
+            self.tracks.setdefault(t.key, t)
+        states = [self.state.get(t.key) for t in tracks]
+        if states and all(s == MARKED for s in states):
+            for t in tracks:
+                self.set_state(t.key, None)
+            return
+        for t in tracks:
+            if self.state.get(t.key) is None:
+                if self._exists(t):
+                    self.state[t.key] = DONE
+                    self.rerender_result(t.key)
+                else:
+                    self.set_state(t.key, MARKED)
+
+    def action_mark_all(self) -> None:
+        if self.views:
+            self.mark_tracks([self.tracks[k] for k in self.views[-1]["keys"] if k in self.tracks])
 
     def action_unmark(self) -> None:
         vid = self._cursor_id(self.query_one(Queue))
@@ -483,9 +600,10 @@ class Ytmq(App):
         self.query_one("#where", Static).update(where)
 
         results = self.query_one(Results)
-        heading = Text("Results", style=f"bold {TEXT}")
-        if results.display and results.row_count:
-            heading.append(f"  {results.row_count}", style=FAINT)
+        if self.views and results.display:
+            heading = self.views[-1]["heading"]
+        else:
+            heading = Text("Results", style=f"bold {TEXT}")
         self.query_one("#results-heading", Static).update(heading)
 
         queue_heading = Text("Queue", style=f"bold {TEXT}")
@@ -504,23 +622,31 @@ class Ytmq(App):
         download = ("ctrl+d", f"download {marked}", True) if marked else None
         focused = self.focused
         if focused is results:
-            hints = [("space", "mark", False), ("enter", "download now", False), download,
-                     ("type", "new search", False)]
+            item = self.cursor_item()
+            if isinstance(item, Album):
+                hints = [("enter", "open", False), ("space", "mark album", False)]
+            elif isinstance(item, Artist):
+                hints = [("enter", "open", False)]
+            else:
+                hints = [("space", "mark", False), ("enter", "download now", False), ("ctrl+a", "mark all", False)]
+            hints += [download, ("esc", "back" if len(self.views) > 1 else "search", False)]
         elif focused is self.query_one(Queue):
             hints = [("del", "remove", False), download, ("esc", "search", False)]
         else:
             hints = [("enter", "search", False), ("↓", "results", False), download,
-                     ("ctrl+t", "videos" if self.kind == "songs" else "songs", False),
+                     ("ctrl+t", f"show {FILTERS_NEXT[self.kind]}", False),
                      ("ctrl+f", "format", False), ("ctrl+o", "folder", False)]
         hints.append(("ctrl+q", "quit", False))
         self.query_one("#hints", Static).update(keys(*(h for h in hints if h)))
 
     # ---- downloading ----
 
-    def action_download_now(self) -> None:
-        vid = self._cursor_id(self.query_one(Results))
-        if vid and self.state.get(vid) in (None, MARKED, FAILED):
-            self.enqueue(vid)
+    def action_activate(self) -> None:
+        item = self.cursor_item()
+        if isinstance(item, (Album, Artist)):
+            self.open_item(item)
+        elif isinstance(item, Track) and self.state.get(item.key) in (None, MARKED, FAILED):
+            self.enqueue(item.key)
 
     def action_download_marked(self) -> None:
         pending = [vid for vid, s in self.state.items() if s in (MARKED, FAILED)]
