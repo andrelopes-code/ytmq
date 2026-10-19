@@ -59,8 +59,25 @@ ffmpeg on PATH is used when present; otherwise the static build bundled with `im
 
 Config file: `~/.config/ytmq/config.json` (Linux), `%LOCALAPPDATA%\ytmq\ytmq\config.json` (Windows).
 
-## Tests
+## Development
 
 ```sh
-uv run pytest
+uv run pytest        # tests
+uvx ruff check .     # lint
+uvx ruff format .    # format
+uvx basedpyright     # type check
 ```
+
+| Module | Responsibility |
+|---|---|
+| `models.py` | `Track`, `Album`, `Artist`; `SearchFilter` and `AudioFormat` enums |
+| `config.py` | settings remembered between runs |
+| `catalog.py` | YouTube Music search, album tracks, artist pages |
+| `download.py` | yt-dlp download, ffmpeg conversion, retries |
+| `tagging.py` | tags and cover art per format |
+| `cli.py` | command line arguments |
+| `ui/session.py` | UI state without widgets: track states, queue summary, navigation stack |
+| `ui/render.py` | Rich text for cells, headings and key hints |
+| `ui/widgets.py` | results table, queue table, output folder dialog |
+| `ui/app.py` | the Textual app wiring it together |
+| `ui/theme.py`, `ui/app.tcss` | palette and layout |

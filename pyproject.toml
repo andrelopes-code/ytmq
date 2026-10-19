@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ytmq = "ytmq.app:main"
+ytmq = "ytmq.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.13,<0.12.0"]
@@ -31,3 +31,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
