@@ -1,0 +1,32 @@
+[project]
+name = "ytmq"
+version = "0.1.0"
+description = "Search and download YouTube Music songs from the terminal"
+readme = "README.md"
+authors = [
+    { name = "André Lopes", email = "andre@siriusgroup.com.br" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mutagen>=1.48.1",
+    "platformdirs>=4.13.5",
+    "textual>=8.2.8",
+    "yt-dlp[default]>=2026.8.19",
+    "ytmusicapi>=1.12.3",
+]
+
+[project.scripts]
+ytmq = "ytmq.app:main"
+
+[build-system]
+requires = ["uv_build>=0.11.13,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
