@@ -18,6 +18,7 @@ Windows: `winget install astral-sh.uv DenoLand.Deno`, then the same command. Use
 ytmq                         # opens with the last output folder
 ytmq -o ~/Music/new          # sets the output folder and remembers it
 ytmq daft punk               # opens with this search already run
+ytmq -f opus                 # sets the audio format and remembers it
 ytmq -j 8                    # 8 parallel downloads (default: 4)
 ```
 
@@ -31,15 +32,24 @@ ytmq -j 8                    # 8 parallel downloads (default: 4)
 | Ctrl+D | download all marked tracks |
 | Ctrl+O | change the output folder (remembered) |
 | Ctrl+T | toggle the songs / videos filter (remembered) |
+| Ctrl+F | cycle the audio format mp3 / opus / m4a (remembered) |
 | Tab | switch between list and queue |
 | Delete (queue) | remove from the queue |
 | Ctrl+Q | quit |
 
-Status: `●` marked · `…` queued · `NN%` downloading · `✓` done or already in the folder · `✗` failed (Ctrl+D retries).
+Status: `●` marked · `◌` waiting · `↓` downloading · `✓` saved or already in the folder · `✗` failed, with the reason in the queue (Ctrl+D retries).
 
 ## Output format
 
-Original AAC stream (`.m4a`, ~128 kbps), not re-encoded. Title, artist, album and cover art are written to the tags. Files are named `Artist - Title.m4a`. A track whose file already exists in the output folder is skipped.
+| Format | Source | Conversion |
+|---|---|---|
+| mp3 (default) | best audio stream | LAME VBR V2 (~190 kbps) |
+| opus | original Opus stream (~130 kbps) | none, remuxed into `.opus` |
+| m4a | original AAC stream (~128 kbps) | none, remuxed into a standard MP4 container |
+
+Title, artist, album and cover art are written to the tags. Files are named `Artist - Title.<format>`. A track whose file already exists in the output folder, in the selected format, is skipped. Failed downloads are retried up to 3 times.
+
+ffmpeg on PATH is used when present; otherwise the static build bundled with `imageio-ffmpeg` is used, so no system install is required.
 
 Config file: `~/.config/ytmq/config.json` (Linux), `%LOCALAPPDATA%\ytmq\ytmq\config.json` (Windows).
 

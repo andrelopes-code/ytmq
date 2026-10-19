@@ -37,9 +37,9 @@ def test_safe_filename():
     assert core.safe_filename("") == "untitled"
 
 
-def test_glob_escape_matches_literal_brackets(tmp_path: Path):
-    (tmp_path / "A - B [Live].m4a").write_bytes(b"")
-    assert list(tmp_path.glob(core.glob_escape("A - B [Live]") + ".*"))
+def test_target_path_uses_format_extension(tmp_path: Path):
+    t = core.parse_result(RAW)
+    assert core.target_path(t, tmp_path, "opus") == tmp_path / "Daft Punk - Around the World.opus"
 
 
 def test_config_roundtrip(tmp_path: Path):
@@ -58,8 +58,13 @@ def test_resolve_output_priority(tmp_path: Path):
 
 def test_download_skips_existing(tmp_path: Path):
     t = core.parse_result(RAW)
-    existing = tmp_path / f"{t.filename}.m4a"
+    existing = tmp_path / f"{t.filename}.mp3"
     existing.write_bytes(b"x")
     seen = []
-    assert core.download(t, tmp_path, seen.append) == existing
+    assert core.download(t, tmp_path, "mp3", seen.append) == existing
     assert seen == [1.0]
+
+
+def test_clean_error_strips_ansi_and_prefix():
+    raw = Exception("\x1b[0;31mERROR:\x1b[0m unable to download video data:  HTTP Error 403: Forbidden")
+    assert core.clean_error(raw) == "unable to download video data: HTTP Error 403: Forbidden"

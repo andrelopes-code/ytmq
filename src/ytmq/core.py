@@ -14,6 +14,9 @@ from platformdirs import user_config_dir, user_music_dir
 
 CONFIG_PATH = Path(user_config_dir("ytmq")) / "config.json"
 FILTERS = ("songs", "videos")
+FORMATS = ("mp3", "opus", "m4a")
+# Preferred source stream per output format; opus and m4a are copied without re-encoding.
+SOURCE = {"mp3": "bestaudio", "opus": "bestaudio[acodec=opus]/bestaudio", "m4a": "bestaudio[ext=m4a]/bestaudio"}
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -92,29 +95,57 @@ def js_runtimes() -> dict:
     return found or {"deno": {}}
 
 
+ATTEMPTS = 3
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def clean_error(error: Exception) -> str:
+    return " ".join(_ANSI.sub("", str(error)).replace("ERROR:", "").split())
+
+
+def ffmpeg_path() -> str:
+    """System ffmpeg when installed, otherwise the static build shipped by imageio-ffmpeg."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def target_path(track: Track, output: Path, fmt: str) -> Path:
+    return output / f"{track.filename}.{fmt}"
+
+
 def download(
     track: Track,
     output: Path,
+    fmt: str = "mp3",
     on_progress: Callable[[float], None] = lambda _: None,
 ) -> Path:
-    """Download the audio stream without re-encoding and tag it. Returns the file path."""
+    """Download the audio, convert it to `fmt`, tag it. Returns the file path."""
     import yt_dlp
 
     output.mkdir(parents=True, exist_ok=True)
-    existing = next(iter(output.glob(f"{glob_escape(track.filename)}.*")), None)
-    if existing:
+    target = target_path(track, output, fmt)
+    if target.exists():
         on_progress(1.0)
-        return existing
+        return target
 
     def hook(d: dict) -> None:
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             if total:
-                on_progress(min(d.get("downloaded_bytes", 0) / total, 0.99))
+                # The last 5% covers conversion and tagging.
+                on_progress(min(d.get("downloaded_bytes", 0) / total, 1.0) * 0.95)
 
     opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio",
+        "format": SOURCE[fmt],
         "outtmpl": str(output / f"{track.filename}.%(ext)s"),
+        # mp3 V2 (~190 kbps) already exceeds the ~130 kbps source; compression level 7 halves encode time.
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": fmt, "preferredquality": "2"}],
+        "postprocessor_args": {"extractaudio": ["-compression_level", "7"]} if fmt == "mp3" else {},
+        "ffmpeg_location": ffmpeg_path(),
         "js_runtimes": js_runtimes(),
         "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
@@ -122,21 +153,80 @@ def download(
         "no_warnings": True,
         "noprogress": True,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(track.url, download=True)
-        path = Path(info["requested_downloads"][0]["filepath"])
-    tag(path, track)
+    # YouTube intermittently answers 403 for a stream URL; a fresh extraction gets a new one.
+    for attempt in range(ATTEMPTS):
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([track.url])
+            break
+        except yt_dlp.utils.DownloadError as e:
+            if attempt == ATTEMPTS - 1:
+                raise RuntimeError(clean_error(e)) from None
+    if not target.exists():
+        raise RuntimeError(f"conversion to {fmt} produced no file")
+    tag(target, track)
     on_progress(1.0)
-    return path
+    return target
 
 
-def glob_escape(name: str) -> str:
-    return re.sub(r"([\[\]*?])", r"[\1]", name)
+def fetch_cover(url: str) -> bytes | None:
+    if not url:
+        return None
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return r.read()
+    except OSError:
+        return None
 
 
 def tag(path: Path, track: Track) -> None:
-    if path.suffix.lower() != ".m4a":
-        return
+    cover = fetch_cover(track.thumbnail)
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        _tag_mp3(path, track, cover)
+    elif suffix == ".opus":
+        _tag_opus(path, track, cover)
+    elif suffix == ".m4a":
+        _tag_m4a(path, track, cover)
+
+
+def _tag_mp3(path: Path, track: Track, cover: bytes | None) -> None:
+    from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1, ID3NoHeaderError
+
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
+    tags.add(TIT2(encoding=3, text=track.title))
+    if track.artist:
+        tags.add(TPE1(encoding=3, text=track.artist))
+    if track.album:
+        tags.add(TALB(encoding=3, text=track.album))
+    if cover:
+        tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=cover))
+    tags.save(path, v2_version=3)
+
+
+def _tag_opus(path: Path, track: Track, cover: bytes | None) -> None:
+    import base64
+
+    from mutagen.flac import Picture
+    from mutagen.oggopus import OggOpus
+
+    audio = OggOpus(path)
+    audio["title"] = track.title
+    if track.artist:
+        audio["artist"] = track.artist
+    if track.album:
+        audio["album"] = track.album
+    if cover:
+        picture = Picture()
+        picture.type, picture.mime, picture.data = 3, "image/jpeg", cover
+        audio["metadata_block_picture"] = base64.b64encode(picture.write()).decode("ascii")
+    audio.save()
+
+
+def _tag_m4a(path: Path, track: Track, cover: bytes | None) -> None:
     from mutagen.mp4 import MP4, MP4Cover
 
     audio = MP4(path)
@@ -145,10 +235,6 @@ def tag(path: Path, track: Track) -> None:
         audio["\xa9ART"] = [track.artist]
     if track.album:
         audio["\xa9alb"] = [track.album]
-    if track.thumbnail:
-        try:
-            with urllib.request.urlopen(track.thumbnail, timeout=10) as r:
-                audio["covr"] = [MP4Cover(r.read(), imageformat=MP4Cover.FORMAT_JPEG)]
-        except OSError:
-            pass
+    if cover:
+        audio["covr"] = [MP4Cover(cover, imageformat=MP4Cover.FORMAT_JPEG)]
     audio.save()

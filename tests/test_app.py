@@ -21,11 +21,11 @@ def fake(monkeypatch, tmp_path):
     downloaded = []
     lock = threading.Lock()
 
-    def fake_download(t, output, on_progress=lambda _: None):
+    def fake_download(t, output, fmt="mp3", on_progress=lambda _: None):
         on_progress(0.5)
         with lock:
             downloaded.append(t.video_id)
-        return output / f"{t.filename}.m4a"
+        return output / f"{t.filename}.{fmt}"
 
     monkeypatch.setattr(app_mod.core, "Searcher", FakeSearcher)
     monkeypatch.setattr(app_mod.core, "download", fake_download)
@@ -85,3 +85,14 @@ async def test_change_output(fake, tmp_path):
         await pilot.pause()
         assert app.output == target and target.is_dir()
         assert config["output"] == str(target)
+
+
+async def test_format_cycles_and_is_remembered(fake, tmp_path):
+    config = {}
+    app = Ytmq(tmp_path, config)
+    async with app.run_test() as pilot:
+        assert app.fmt == "mp3"
+        await pilot.press("ctrl+f")
+        assert app.fmt == "opus" and config["format"] == "opus"
+        await pilot.press("ctrl+f", "ctrl+f")
+        assert app.fmt == "mp3"
