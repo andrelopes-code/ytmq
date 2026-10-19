@@ -6,9 +6,9 @@ import json
 import re
 import shutil
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
 
 from platformdirs import user_config_dir, user_music_dir
 
@@ -16,7 +16,11 @@ CONFIG_PATH = Path(user_config_dir("ytmq")) / "config.json"
 FILTERS = ("all", "songs", "albums", "videos")
 FORMATS = ("mp3", "opus", "m4a")
 # Preferred source stream per output format; opus and m4a are copied without re-encoding.
-SOURCE = {"mp3": "bestaudio", "opus": "bestaudio[acodec=opus]/bestaudio", "m4a": "bestaudio[ext=m4a]/bestaudio"}
+SOURCE = {
+    "mp3": "bestaudio",
+    "opus": "bestaudio[acodec=opus]/bestaudio",
+    "m4a": "bestaudio[ext=m4a]/bestaudio",
+}
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -41,7 +45,9 @@ class Track:
 
     @property
     def filename(self) -> str:
-        return safe_filename(f"{self.artist} - {self.title}" if self.artist else self.title)
+        return safe_filename(
+            f"{self.artist} - {self.title}" if self.artist else self.title
+        )
 
 
 @dataclass(frozen=True)
@@ -105,7 +111,9 @@ def parse_result(raw: dict) -> Track | None:
 
 def parse_item(raw: dict, artist: str = "") -> Item | None:
     kind = raw.get("resultType")
-    if kind == "album" or (kind is None and str(raw.get("browseId", "")).startswith("MPREb")):
+    if kind == "album" or (
+        kind is None and str(raw.get("browseId", "")).startswith("MPREb")
+    ):
         return Album(
             browse_id=raw["browseId"],
             title=raw.get("title") or "",
@@ -115,7 +123,9 @@ def parse_item(raw: dict, artist: str = "") -> Item | None:
             thumbnail=_thumbnail(raw),
         )
     if kind == "artist" and raw.get("browseId"):
-        return Artist(browse_id=raw["browseId"], name=raw.get("artist") or raw.get("title") or "")
+        return Artist(
+            browse_id=raw["browseId"], name=raw.get("artist") or raw.get("title") or ""
+        )
     if kind in (None, "song", "video"):
         return parse_result(raw)
     return None  # playlists, episodes, podcasts, profiles
@@ -138,7 +148,9 @@ class Searcher:
 
     def search(self, query: str, kind: str = "all", limit: int = 20) -> list[Item]:
         """`all` keeps YouTube Music's own ranking, including the top result (albums, lyrics matches)."""
-        raw = self._yt.search(query, filter=None if kind == "all" else kind, limit=limit)
+        raw = self._yt.search(
+            query, filter=None if kind == "all" else kind, limit=limit
+        )
         return _unique(map(parse_item, raw))
 
     def album(self, album: Album) -> list[Track]:
@@ -148,8 +160,14 @@ class Searcher:
         for t in raw.get("tracks") or []:
             track = parse_result(t)
             if track and t.get("isAvailable", True):
-                tracks.append(replace(track, album=raw.get("title") or album.title, thumbnail=thumbnail,
-                                      artist=track.artist or album.artist))
+                tracks.append(
+                    replace(
+                        track,
+                        album=raw.get("title") or album.title,
+                        thumbnail=thumbnail,
+                        artist=track.artist or album.artist,
+                    )
+                )
         return tracks
 
     def artist(self, artist: Artist) -> list[Item]:
@@ -161,7 +179,9 @@ class Searcher:
             for key, section in (("albums", "Album"), ("singles", "Single"))
             for r in (raw.get(key) or {}).get("results", [])
         ]
-        return _unique([*songs, *(replace(r, artist=r.artist or name) for r in releases if r)])
+        return _unique(
+            [*songs, *(replace(r, artist=r.artist or name) for r in releases if r)]
+        )
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -236,8 +256,16 @@ def download(
         "format": SOURCE[fmt],
         "outtmpl": str(output / f"{track.filename}.%(ext)s"),
         # mp3 V2 (~190 kbps) already exceeds the ~130 kbps source; compression level 7 halves encode time.
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": fmt, "preferredquality": "2"}],
-        "postprocessor_args": {"extractaudio": ["-compression_level", "7"]} if fmt == "mp3" else {},
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": fmt,
+                "preferredquality": "2",
+            }
+        ],
+        "postprocessor_args": {"extractaudio": ["-compression_level", "7"]}
+        if fmt == "mp3"
+        else {},
         "ffmpeg_location": ffmpeg_path(),
         "js_runtimes": js_runtimes(),
         "concurrent_fragment_downloads": 4,
@@ -319,7 +347,9 @@ def _tag_opus(path: Path, track: Track, cover: bytes | None) -> None:
     if cover:
         picture = Picture()
         picture.type, picture.mime, picture.data = 3, "image/jpeg", cover
-        audio["metadata_block_picture"] = base64.b64encode(picture.write()).decode("ascii")
+        audio["metadata_block_picture"] = base64.b64encode(picture.write()).decode(
+            "ascii"
+        )
     audio.save()
 
 
