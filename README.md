@@ -2,6 +2,8 @@
 
 Search and download songs from YouTube Music in the terminal (Linux and Windows).
 
+<img width="1893" height="994" alt="image" src="https://github.com/user-attachments/assets/72185387-00bd-4f11-b210-673a08c5ca7c" />
+
 ## Installation
 
 Requires [uv](https://docs.astral.sh/uv/) and a JavaScript runtime on PATH (Deno, Node or Bun), which yt-dlp needs for YouTube.
